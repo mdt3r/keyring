@@ -1,3 +1,5 @@
+//go:build !keyring_nofile
+
 package keyring
 
 import (
@@ -5,10 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
-	jose "github.com/dvsekhvalnov/jose2go"
 	"github.com/byteness/percent"
+	jose "github.com/dvsekhvalnov/jose2go"
 )
 
 func init() {
@@ -21,9 +24,22 @@ func init() {
 }
 
 var filenameEscape = func(s string) string {
-	return percent.Encode(s, "/")
+	return percent.Encode(s, filenameUnsafeChars(runtime.GOOS))
 }
 var filenameUnescape = percent.Decode
+
+// windowsUnsafeChars are the characters Windows does not allow in file names.
+const windowsUnsafeChars = `/\<>:"|?*` +
+	"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f" +
+	"\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
+
+// filenameUnsafeChars returns the characters percent-encoded in file names on goos.
+func filenameUnsafeChars(goos string) string {
+	if goos == "windows" {
+		return windowsUnsafeChars
+	}
+	return "/"
+}
 
 type fileKeyring struct {
 	dir          string
@@ -33,7 +49,7 @@ type fileKeyring struct {
 
 func (k *fileKeyring) resolveDir() (string, error) {
 	if k.dir == "" {
-		return "", fmt.Errorf("No directory provided for file keyring")
+		return "", fmt.Errorf("no directory provided for file keyring")
 	}
 
 	dir, err := ExpandTilde(k.dir)

@@ -12,15 +12,17 @@ Keyring provides a common interface to a range of secure credential storage serv
 Currently Keyring supports the following backends
  * [macOS Keychain](https://support.apple.com/en-au/guide/keychain-access/welcome/mac) (with TouchID support 🎉)
  * [Windows Credential Manager](https://support.microsoft.com/en-au/help/4026814/windows-accessing-credential-manager)
+ * [Windows Hello](https://support.microsoft.com/en-us/windows/configure-windows-hello-dae28983-8242-bb2a-d3d1-87c9d265a5f0)-gated encrypted Credential Manager backend
  * Secret Service ([Gnome Keyring](https://wiki.gnome.org/Projects/GnomeKeyring), [KWallet](https://kde.org/applications/system/org.kde.kwalletmanager5))
  * [KWallet](https://kde.org/applications/system/org.kde.kwalletmanager5)
  * [Pass](https://www.passwordstore.org/)
+ * [Passage](https://github.com/FiloSottile/passage)
  * [Encrypted file (JWT)](https://datatracker.ietf.org/doc/html/rfc7519)
  * [KeyCtl](https://linux.die.net/man/1/keyctl)
  * [1Password Connect](https://developer.1password.com/docs/connect/)
  * [1Password Service Accounts](https://developer.1password.com/docs/service-accounts)
  * [1Password Desktop Application Integration](https://developer.1password.com/docs/sdks/desktop-app-integrations/)
-
+ * [Proton Pass](https://proton.me/pass) (Note: **experimental**)
 
 ## Usage
 
@@ -49,7 +51,120 @@ keyring.Config.TouchIDAccount = "cc.byteness.aws-vault.biometrics"
 keyring.Config.TouchIDService = "aws-vault"
 ```
 
+`KeychainName` must also be set — biometrics only apply to a custom keychain, not
+the default login keychain. Touch ID is requested only when the OS reports that
+keychain as locked; an already-unlocked keychain is not re-prompted.
+
+### Passage backend
+
+The Passage backend can select an identities file per keyring instance. If
+`PassageIdentitiesFile` is empty, Passage uses `PASSAGE_IDENTITIES_FILE` or its
+own default.
+
+```go
+ring, err := keyring.Open(keyring.Config{
+  AllowedBackends: []keyring.BackendType{keyring.PassageBackend},
+  PassDir: "~/.passage/store",
+  PassPrefix: "example",
+  PassageIdentitiesFile: "~/.passage/identities",
+})
+if err != nil {
+  return err
+}
+```
+
+### Windows Hello backend
+
+The `winhello` backend stores encrypted envelopes in Windows Credential Manager.
+This may sound similar to the `wincred` backend, but the difference is encryption.
+Here, we don't store plaintext item data in Credential Manager. It is encrypted
+with AES-256-GCM, and the content encryption key is wrapped by a Windows Hello /
+Passport KSP key and unwrapped through an interactive private-key operation.
+
+Upon the first use, a new Passport KSP key is created and stored in the user's
+protected key store. This operation requires user interaction and Windows Hello
+authentication. Later, whenever an item is accessed, the content encryption key
+is unwrapped by the Passport KSP key, which requires Windows Hello authentication
+again. This means that every access to the stored secrets requires user presence
+and authentication through Windows Hello (using PIN, fingerprint, face ID, etc.).
+
+This protects against silent reads of the stored Credential Manager blob. It
+does not protect against malware that can read process memory after a successful
+unlock, inject into an approved process, or steal credentials after they are
+handed to a caller.
+
+To use the Windows Hello backend on Windows:
+
+```go
+ring, err := keyring.Open(keyring.Config{
+  ServiceName: "example",
+  AllowedBackends: []keyring.BackendType{
+    keyring.WinHelloBackend,
+  },
+})
+if err != nil {
+  return err
+}
+```
+
 For more detail on the API please check [the keyring godocs](https://godoc.org/github.com/byteness/keyring)
+
+### Proton Pass backend
+
+> **Experimental.** The `proton-pass` backend targets Proton's Pass API, which is
+> unofficial and undocumented: it can change without notice and break this backend.
+> Treat it as beta, pin your dependency, and re-test after upgrades. It is gated behind
+> the `keyring_noprotonpass` build tag (see below) and excluded from opt-out builds.
+
+The `proton-pass` backend stores each secret as an item in a Proton Pass vault,
+authenticated with a Proton Personal Access Token (PAT) of the form `pst_<token>::<key>`,
+so no browser and no `pass-cli` subprocess are involved. Item content is decrypted
+client-side (AES-256-GCM down Proton's key hierarchy). Because the API is reverse
+engineered, the client sends app/SDK version headers mirroring the Proton Pass CLI (for
+example `cli-pass@2.1.4`); Proton may change what it accepts, so those pins can need
+updating over time.
+
+```go
+ring, err := keyring.Open(keyring.Config{
+  ServiceName: "example",
+  AllowedBackends: []keyring.BackendType{
+    keyring.ProtonPassBackend,
+  },
+  ProtonPassShareID: "<share-id>",
+})
+if err != nil {
+  return err
+}
+```
+
+The PAT is read from the `PROTON_PASS_PERSONAL_ACCESS_TOKEN` environment variable (or a
+configured token function), never a command-line flag.
+
+### Reducing the dependency surface (opt-out build tags)
+
+The cross-platform backends compile into every build, whether or not you use
+them, along with their dependency trees. If you know at build time that you
+don't need a backend, an opt-out build tag excludes it (and its dependencies)
+from compilation:
+
+| Build tag | Backends removed | Headline dependencies dropped |
+|---|---|---|
+| `keyring_no1password` | `op`, `op-connect`, `op-desktop` | `onepassword-sdk-go` (incl. the `wazero` WebAssembly runtime), `connect-sdk-go` (incl. `jaeger-client-go`) |
+| `keyring_nofile` | `file` | `dvsekhvalnov/jose2go` |
+| `keyring_nopass` | `pass` | none (shells out to `pass`) |
+| `keyring_nopassage` | `passage` | none (shells out to `passage`) |
+
+```bash
+go build -tags keyring_no1password ./...
+```
+
+The platform-specific backends (`keychain`, `wincred`, `winhello`,
+`secret-service`, `kwallet`, `keyctl`) are already gated by GOOS constraints
+and need no tags. Default builds (no tags) are unaffected. An excluded backend
+is simply absent from `AvailableBackends()`, and requesting it explicitly
+returns `ErrNoAvailImpl` — the same behavior as a backend that's unavailable
+on the current platform. The `BackendType` constants and `Config` fields are
+always present, so there is no API change under any tag.
 
 
 ## Testing
@@ -64,19 +179,13 @@ vagrant up
 ./bin/go-test
 ```
 
+## 🧰 Contributing
 
-## Contributing
+Report issues/questions/feature requests on in the [issues](https://github.com/byteness/keyring/issues/new) section.
 
-Contributions to the keyring package are most welcome from engineers of all backgrounds and skill levels. In particular the addition of extra backends across popular operating systems would be appreciated.
+Full contributing [guidelines are covered here](.github/CONTRIBUTING.md).
 
-This project will adhere to the [Go Community Code of Conduct](https://golang.org/conduct) in the github provided discussion spaces, with the moderators being the part of ByteNess engineering team.
+## Maintainers
 
-To make a contribution:
-
-  * Fork the repository
-  * Make your changes on the fork
-  * Submit a pull request back to this repo with a clear description of the problem you're solving
-  * Ensure your PR passes all current (and new) tests
-  * Ideally verify that [aws-vault](https://github.com/bteness/aws-vault) works with your changes (optional)
-
-...and we'll do our best to get your work merged in!
+* [Marko Bevc](https://github.com/mbevc1)
+* Full [contributors list](https://github.com/byteness/keyring/graphs/contributors)

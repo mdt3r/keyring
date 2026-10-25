@@ -1,17 +1,17 @@
-//go:build darwin && cgo
-// +build darwin,cgo
+//go:build darwin && !ios
 
 package keyring
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 
 	gokeychain "github.com/byteness/go-keychain"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 
-	"github.com/lox/go-touchid"
+	"github.com/noamcohen97/touchid-go"
 )
 
 const (
@@ -28,10 +28,19 @@ type keychain struct {
 	isAccessibleWhenUnlocked bool
 	isTrusted                bool
 
-	isTouchIDAuthenticated bool
-	useTouchID             bool
-	touchIDAccount         string
-	touchIDService         string
+	useTouchID     bool
+	touchIDAccount string
+	touchIDService string
+
+	// authenticateFn overrides the biometric check in tests; nil selects touchid.Authenticate.
+	authenticateFn func(ctx context.Context, policy touchid.Policy, reason string) error
+}
+
+func (k *keychain) authenticate(ctx context.Context, policy touchid.Policy, reason string) error {
+	if k.authenticateFn != nil {
+		return k.authenticateFn(ctx, policy, reason)
+	}
+	return touchid.Authenticate(ctx, policy, reason)
 }
 
 func init() {
@@ -40,12 +49,12 @@ func init() {
 			service:      cfg.ServiceName,
 			passwordFunc: cfg.KeychainPasswordFunc,
 
-			// Set the isAccessibleWhenUnlocked to the boolean value of
-			// KeychainAccessibleWhenUnlocked is a shorthand for setting the accessibility value.
+			isSynchronizable: cfg.KeychainSynchronizable,
+
+			// Set isAccessibleWhenUnlocked to the boolean value of KeychainAccessibleWhenUnlocked,
+			// which is a shorthand for setting the accessibility value.
 			// See: https://developer.apple.com/documentation/security/ksecattraccessiblewhenunlocked
 			isAccessibleWhenUnlocked: cfg.KeychainAccessibleWhenUnlocked,
-
-			isTouchIDAuthenticated: false,
 		}
 		if cfg.UseBiometrics {
 			switch {
@@ -70,7 +79,28 @@ func init() {
 	})
 }
 
+// ensureUnlocked unlocks the custom keychain via Touch ID, but only when the
+// OS reports it as locked.
+func (k *keychain) ensureUnlocked() error {
+	if k.path == "" || !k.useTouchID {
+		return nil
+	}
+	locked, err := gokeychain.NewWithPath(k.path).IsLocked()
+	if errors.Is(err, gokeychain.ErrorNoSuchKeychain) {
+		return nil // creation belongs to the Set path
+	}
+	if err != nil || !locked {
+		return err
+	}
+	_, err = k.openWithTouchID()
+	return err
+}
+
 func (k *keychain) Get(key string) (Item, error) {
+	if err := k.ensureUnlocked(); err != nil {
+		return Item{}, err
+	}
+
 	query := gokeychain.NewItem()
 	query.SetSecClass(gokeychain.SecClassGenericPassword)
 	query.SetService(k.service)
@@ -108,6 +138,10 @@ func (k *keychain) Get(key string) (Item, error) {
 }
 
 func (k *keychain) GetMetadata(key string) (Metadata, error) {
+	if err := k.ensureUnlocked(); err != nil {
+		return Metadata{}, err
+	}
+
 	query := gokeychain.NewItem()
 	query.SetSecClass(gokeychain.SecClassGenericPassword)
 	query.SetService(k.service)
@@ -136,7 +170,7 @@ func (k *keychain) GetMetadata(key string) (Metadata, error) {
 		ModificationTime: results[0].ModificationDate,
 	}
 
-	debugf("Found metadata for %q", md.Item.Label)
+	debugf("Found metadata for %q", md.Label)
 
 	return md, nil
 }
@@ -155,7 +189,7 @@ func (k *keychain) updateItem(kc gokeychain.Keychain, kcItem gokeychain.Item, ac
 
 	results, err := gokeychain.QueryItem(queryItem)
 	if err != nil {
-		return fmt.Errorf("Failed to query keychain: %v", err)
+		return fmt.Errorf("failed to query keychain: %v", err)
 	}
 	if len(results) == 0 {
 		return errors.New("no results")
@@ -165,7 +199,7 @@ func (k *keychain) updateItem(kc gokeychain.Keychain, kcItem gokeychain.Item, ac
 	kcItem.SetAccess(nil)
 
 	if err := gokeychain.UpdateItem(queryItem, kcItem); err != nil {
-		return fmt.Errorf("Failed to update item in keychain: %v", err)
+		return fmt.Errorf("failed to update item in keychain: %v", err)
 	}
 
 	return nil
@@ -236,6 +270,10 @@ func (k *keychain) Set(item Item) error {
 }
 
 func (k *keychain) Remove(key string) error {
+	if err := k.ensureUnlocked(); err != nil {
+		return err
+	}
+
 	item := gokeychain.NewItem()
 	item.SetSecClass(gokeychain.SecClassGenericPassword)
 	item.SetService(k.service)
@@ -264,6 +302,10 @@ func (k *keychain) Remove(key string) error {
 }
 
 func (k *keychain) Keys() ([]string, error) {
+	if err := k.ensureUnlocked(); err != nil {
+		return nil, err
+	}
+
 	query := gokeychain.NewItem()
 	query.SetSecClass(gokeychain.SecClassGenericPassword)
 	query.SetService(k.service)
@@ -304,8 +346,8 @@ func (k *keychain) createOrOpen() (gokeychain.Keychain, error) {
 	debugf("Checking keychain status")
 	err := kc.Status()
 	if err == nil {
-		if k.useTouchID {
-			return k.openWithTouchID()
+		if err := k.ensureUnlocked(); err != nil {
+			return gokeychain.Keychain{}, err
 		}
 		debugf("Keychain status returned nil, keychain exists")
 		return kc, nil
@@ -332,21 +374,10 @@ func (k *keychain) createOrOpen() (gokeychain.Keychain, error) {
 }
 
 func (k *keychain) openWithTouchID() (gokeychain.Keychain, error) {
-	if k.isTouchIDAuthenticated {
-		// already unlocked, return keychain
-		return gokeychain.NewWithPath(k.path), nil
-	}
-
 	debugf("checking with touchid")
-	ok, err := touchid.Authenticate("unlock " + k.path)
-	if err != nil {
-		return gokeychain.Keychain{}, fmt.Errorf("failed to authenticate with biometrics: %v", err)
+	if err := k.authenticate(context.Background(), touchid.PolicyDeviceOwnerAuthentication, "unlock "+k.path); err != nil {
+		return gokeychain.Keychain{}, fmt.Errorf("failed to authenticate with biometrics: %w", err)
 	}
-	if !ok {
-		return gokeychain.Keychain{}, fmt.Errorf("failed to authenticate with biometrics")
-	}
-
-	k.isTouchIDAuthenticated = true
 
 	debugf("looking up %s password in login.keychain", k.path)
 	query := gokeychain.NewItem()
@@ -362,17 +393,15 @@ func (k *keychain) openWithTouchID() (gokeychain.Keychain, error) {
 		return gokeychain.Keychain{}, fmt.Errorf("failed to query keychain: %v", err)
 	}
 
-	var passphrase string
 	if len(results) != 1 {
-		// touch ID was never set up, let's do it now
-		var err error
-		passphrase, err = k.setupTouchID()
-		if err != nil {
+		// touch ID was never set up, let's do it now; setupTouchID unlocks the
+		// keychain as part of storing the passphrase
+		if _, err := k.setupTouchID(); err != nil {
 			return gokeychain.Keychain{}, fmt.Errorf("failed to setup touchid: %v", err)
 		}
 	} else {
 		debugf("found password in login.keychain, unlocking %s with stored password", k.path)
-		passphrase = string(results[0].Data)
+		passphrase := string(results[0].Data)
 
 		// try unlocking with the passphrase we found
 		if err := gokeychain.UnlockAtPath(k.path, passphrase); err != nil {
@@ -392,7 +421,7 @@ func (k *keychain) setupTouchID() (string, error) {
 	if k.passwordFunc == nil {
 		debugf("Creating keychain %s with prompt", k.path)
 		fmt.Printf("Password for %q: ", k.path)
-		passphraseBytes, err := terminal.ReadPassword(int(os.Stdin.Fd()))
+		passphraseBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
 		if err != nil {
 			return "", fmt.Errorf("failed to read password: %v", err)
 		}

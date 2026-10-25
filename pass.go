@@ -1,9 +1,9 @@
-//go:build !windows
-// +build !windows
+//go:build !windows && !keyring_nopass
 
 package keyring
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,7 +47,7 @@ func init() {
 		// fail if the pass program is not available
 		_, err = exec.LookPath(pass.passcmd)
 		if err != nil {
-			return nil, errors.New("The pass program is not available")
+			return nil, errors.New("the pass program is not available")
 		}
 
 		return pass, nil
@@ -61,7 +61,7 @@ type passKeyring struct {
 }
 
 func (k *passKeyring) pass(args ...string) *exec.Cmd {
-	cmd := exec.Command(k.passcmd, args...)
+	cmd := exec.CommandContext(context.Background(), k.passcmd, args...)
 	if k.dir != "" {
 		cmd.Env = append(os.Environ(), fmt.Sprintf("PASSWORD_STORE_DIR=%s", k.dir))
 	}
@@ -88,7 +88,7 @@ func (k *passKeyring) Get(key string) (Item, error) {
 	return decoded, err
 }
 
-func (k *passKeyring) GetMetadata(key string) (Metadata, error) {
+func (k *passKeyring) GetMetadata(_ string) (Metadata, error) {
 	return Metadata{}, nil
 }
 

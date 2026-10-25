@@ -21,20 +21,20 @@ jobs:
     name: lint
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: 'stable'
           #go-version-file: 'go.mod'
           check-latest: true
-      - name: Lint
-        run: |
-          #golint ./...
-          go vet -all ./...
-      #- name: golangci-lint
-      #  uses: golangci/golangci-lint-action@v8
-      #  with:
-      #    version: v2.1
+      #- name: vet
+      #  run: |
+      #    #golint ./...
+      #    go vet -all ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: 'latest'

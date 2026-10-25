@@ -18,11 +18,14 @@ const (
 	KeyCtlBackend        BackendType = "keyctl"
 	KWalletBackend       BackendType = "kwallet"
 	WinCredBackend       BackendType = "wincred"
+	WinHelloBackend      BackendType = "winhello"
 	FileBackend          BackendType = "file"
 	PassBackend          BackendType = "pass"
+	PassageBackend       BackendType = "passage"
 	OPBackend            BackendType = "op"
 	OPConnectBackend     BackendType = "op-connect"
 	OPDesktopBackend     BackendType = "op-desktop"
+	ProtonPassBackend    BackendType = "proton-pass"
 )
 
 // This order makes sure the OS-specific backends
@@ -34,7 +37,8 @@ const (
 var backendOrder = []BackendType{
 	// Windows
 	WinCredBackend,
-	// MacOS
+	WinHelloBackend,
+	// MacOS & iOS
 	KeychainBackend,
 	// Linux
 	SecretServiceBackend,
@@ -42,11 +46,14 @@ var backendOrder = []BackendType{
 	KeyCtlBackend,
 	// General
 	PassBackend,
+	PassageBackend,
 	FileBackend,
 	// 1Password
 	OPConnectBackend,
 	OPBackend,
 	OPDesktopBackend,
+	// Proton Pass (after FileBackend: never auto-selected, must be chosen explicitly)
+	ProtonPassBackend,
 }
 
 var supportedBackends = map[BackendType]opener{}
@@ -121,17 +128,17 @@ type Keyring interface {
 }
 
 // ErrNoAvailImpl is returned by Open when a backend cannot be found.
-var ErrNoAvailImpl = errors.New("Specified keyring backend not available")
+var ErrNoAvailImpl = errors.New("specified keyring backend not available")
 
 // ErrKeyNotFound is returned by Keyring Get when the item is not on the keyring.
-var ErrKeyNotFound = errors.New("The specified item could not be found in the keyring")
+var ErrKeyNotFound = errors.New("the specified item could not be found in the keyring")
 
 // ErrMetadataNeedsCredentials is returned when Metadata is called against a
 // backend which requires credentials even to see metadata.
-var ErrMetadataNeedsCredentials = errors.New("The keyring backend requires credentials for metadata access")
+var ErrMetadataNeedsCredentials = errors.New("the keyring backend requires credentials for metadata access")
 
 // ErrMetadataNotSupported is returned when Metadata is not available for the backend.
-var ErrMetadataNotSupported = errors.New("The keyring backend does not support metadata access")
+var ErrMetadataNotSupported = errors.New("the keyring backend does not support metadata access")
 
 var (
 	// Debug specifies whether to print debugging output.
