@@ -4,6 +4,12 @@ Keyring
 [![Documentation](https://godoc.org/github.com/byteness/keyring?status.svg)](https://godoc.org/github.com/byteness/keyring)
 
 > [!NOTE]
+> About this fork.   
+> This is connected with the pr [ByteNess/keyring#60](https://github.com/ByteNess/keyring/pull/60) so I could use age for persistent and gpg-agent for session keys (non-cached vs cached). This is just adding a change I was using from January.  
+> Now there is support for this out of the box through [ByteNess/keyring#109](https://github.com/ByteNess/keyring/pull/109) so we will go back to upstream. commiting this for archival purposes.  
+Bellow are the original docs ...
+---
+> [!NOTE]
 > This is a maintained fork of https://github.com/99designs/keyring which seems to be an abandoned project.
 > Contributions are welcome, but keep in mind this is a side project and maintained on best effort basis!
 
